@@ -47,36 +47,31 @@ typedef struct{
 
 
 
-uint8_t one_compliment(uint8_t in)
+#define addr_dir()      (mem[reg->PC + 1])
+#define addr_ext()      ((mem[reg->PC + 1] << 8) + mem[reg->PC + 2])
+#define one_comp(in)    ((in) ^ 255)
+#define two_comp(in)    (one_comp((in)) + 1)
+#define stack_push(in)  (mem[reg->SP--] = (in))
+#define stack_pop()     (mem[++reg->SP])
+
+void irq(registers_t* reg, uint8_t *mem)
 {
-    return in ^ 255;
+    
 }
 
-uint8_t two_compliment(uint8_t in)
+void irq_nonmasked(registers_t* reg, uint8_t *mem)
 {
-    return one_compliment(in) + 1;
+    
 }
-
-void stack_push(registers_t *reg, uint8_t *mem, uint8_t val)
-{
-    //printf("stackpush @ %02X\n", reg->PC);
-    mem[reg->SP--] = val;
-}
-
-uint8_t stack_pop(registers_t *reg, uint8_t *mem)
-{
-    //printf("stackpop @ %02X\n", reg->PC);
-    return mem[++reg->SP];
-}
-
 
 void do_step(registers_t *reg, uint8_t *mem)
 {
+    uint16_t pc = reg->PC;
+    uint16_t addr = 0;
+    int32_t temp = -1;
+    
     switch(reg->IR)
     {
-        case(0x01):     //NOP
-            reg->PC++;
-            break;
         case(0x06):     //TAP
             reg->CC.H = (reg->A & 0x32) >> 5;
             reg->CC.I = (reg->A & 0x16) >> 4;
@@ -93,14 +88,6 @@ void do_step(registers_t *reg, uint8_t *mem)
             reg->A += reg->CC.Z << 2;
             reg->A += reg->CC.V << 1;
             reg->A += reg->CC.C;
-            reg->PC++;
-            break;
-        case(0x08):     //INX
-            reg->X++;
-            reg->PC++;
-            break;
-        case(0x09):     //DEX
-            reg->X--;
             reg->PC++;
             break;
         case(0x0A):     //CLV
@@ -129,20 +116,20 @@ void do_step(registers_t *reg, uint8_t *mem)
             break;
         case(0x10):     //SBA
         {
-            uint8_t result = reg->A + two_compliment(reg->B);
-            reg->CC.N = (result & 128) != 0;    //Set negative flag
-            reg->CC.Z = (result == 0);            //Set zero flag
-            reg->CC.C = (result & 128) != (reg->A & 128);   //Set carry flag
-            reg->A = result;
+            temp = reg->A + two_comp(reg->B);
+            reg->CC.N = (temp & 128) != 0;    //Set negative flag
+            reg->CC.Z = (temp == 0);            //Set zero flag
+            reg->CC.C = (temp & 128) != (reg->A & 128);   //Set carry flag
+            reg->A = temp;
             reg->PC++;
             break;
         }
         case(0x11):     //CBA
         {
-            uint8_t result = reg->A + two_compliment(reg->B);
-            reg->CC.N = (result & 128) != 0;    //Set negative flag
-            reg->CC.Z = (result == 0);            //Set zero flag
-            reg->CC.C = (result & 128) != (reg->A & 128);   //Set carry flag
+            temp = reg->A + two_comp(reg->B);
+            reg->CC.N = (temp & 128) != 0;    //Set negative flag
+            reg->CC.Z = (temp == 0);            //Set zero flag
+            reg->CC.C = (temp & 128) != (reg->A & 128);   //Set carry flag
             reg->PC++;
             break;
         }
@@ -153,36 +140,20 @@ void do_step(registers_t *reg, uint8_t *mem)
             break;
         case(0x96):     //LDA A - direct
         {
-            reg->A = mem[mem[++reg->PC]];
+            reg->A = mem[addr_dir()];
             reg->PC++;
             break;
         }
         case(0xD6):     //LDA B - direct
         {
-            reg->B = mem[mem[++reg->PC]];
-            reg->PC++;
-            break;
-        }
-        case(0xFE):     //LDX - extended
-        {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            
-            reg->X = (mem[addr] << 8) + mem[addr + 1];
-            reg->PC += 3;
+            reg->B = mem[addr_dir()];
+            reg->PC +=2;
             break;
         }
         case(0xA6):     //LDAA - index
         {
             reg->A = mem[reg->X + mem[reg->PC + 1]];
             reg->PC += 2;
-            break;
-        }
-        case(0x27):     //BEQ - direct
-        {
-            if(reg->CC.Z)
-                reg->PC = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            else
-                reg->PC += 2;
             break;
         }
         case(0xA7):     //STAA - index
@@ -193,23 +164,14 @@ void do_step(registers_t *reg, uint8_t *mem)
         }
         case(0xB6):     //LDAA - extended
         {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            reg->A = mem[addr];
+            reg->A = mem[addr_ext()];
             reg->PC += 3;
             break;
         }
         case(0xB7):     //STAA - extended
         {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            mem[addr] = reg->A;
+            mem[addr_ext()] = reg->A;
             reg->PC += 3;
-            break;
-        }
-        case(0xBD):     //JSR - extended
-        {
-            stack_push(reg, mem, (reg->PC & 0xFF));
-            stack_push(reg, mem, ((reg->PC >> 8) & 0xFF));
-            reg->PC = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
             break;
         }
         case(0xC6):     //LDAB - immediate
@@ -220,7 +182,7 @@ void do_step(registers_t *reg, uint8_t *mem)
         }
         case(0x36):     //PSHA - inherent
         {
-            stack_push(reg, mem, reg->A);
+            stack_push(reg->A);
             reg->PC++;
             break;
         }
@@ -232,69 +194,324 @@ void do_step(registers_t *reg, uint8_t *mem)
         }
         case(0xB1):     //CMPA - extended
         {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            uint8_t result = reg->A - mem[addr];
-            reg->CC.N = (result & 128) != 0;    //Set negative flag
-            reg->CC.Z = (result == 0);            //Set zero flag
-            reg->CC.C = (result & 128) != (reg->A & 128);   //Set carry flag
+            temp = reg->A - mem[addr_ext()];
+            reg->CC.N = (temp & 128) != 0;    //Set negative flag
+            reg->CC.Z = (temp == 0);            //Set zero flag
+            reg->CC.C = (temp & 128) != (reg->A & 128);   //Set carry flag
             reg->PC += 3;
             break;
         }
-        case(0x22):     //BHI - direct
+         case(0x32):     //PULA - inherent
         {
-            if(reg->CC.C + reg->CC.Z == 0)
-                reg->PC = mem[reg->PC + 1];
-            else
-                reg->PC += 2;
-            break;
-        }
-        case(0x32):     //PULA - inherent
-        {
-            reg->A = stack_pop(reg, mem);
+            reg->A = stack_pop();
             reg->PC++;
             break;
         }
         case(0x7C):     //INC - extended
         {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            mem[addr]++;
+            mem[addr_ext()]++;
             reg->PC += 3;
-            break;
-        }
-        case(0x29):     //BVS - direct
-        {
-            if(reg->CC.V)
-                reg->PC = mem[reg->PC + 1];
-            else
-                reg->PC += 2;
-            break;
-        }
-        case(0x7E):     //JMP - extended
-        {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            reg->PC = mem[addr];
             break;
         }
         case(0xF6):     //LDAB - extended
         {
-            uint16_t addr = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
-            reg->B = mem[addr];
+            reg->B = mem[addr_ext()];
             reg->PC += 3;
             break;
         }
-        case(0x39):     //RTS - inherent
-        {
-            uint16_t addr = stack_pop(reg, mem) << 8;
-            addr += stack_pop(reg, mem);
-            reg->PC = addr;
-            break;
-        }
+
+        /*
+         * Branch if
+         * addr: direct
+         * len: 2
+         */
         
-        default:
-            printf("Unimplemented opcode 0x%02X at 0x%04X\n", reg->IR, reg->PC);
-            exit(-1);
+        //BRA - Always
+        case(0x20):     
+            reg->PC = addr_dir();
             break;
             
+        //BHI - Higher
+        case(0x22):
+            if((reg->CC.C + reg->CC.Z) == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BLS - Lower or same
+        case(0x23):
+            if((reg->CC.C + reg->CC.Z) == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BCC - Carry is clear
+        case(0x24):
+            if(reg->CC.C == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BCS - Carry is set
+        case(0x25):
+            if(reg->CC.C == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BNE - Not zero
+        case(0x26):
+            if(reg->CC.Z == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BEQ - Equals zero
+        case(0x27):
+            if(reg->CC.Z == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BVC - Overflow clear
+        case(0x28):
+            if(reg->CC.V == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BVS - Overflow set
+        case(0x29):
+            if(reg->CC.V == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BPL - Plus
+        case(0x2A):
+            if(reg->CC.N == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BMI - Minus
+        case(0x2B):
+            if(reg->CC.N == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BGE - Greater or equal to zero
+        case(0x2C):
+            if((reg->CC.N ^ reg->CC.V) == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BLT - Less than zero
+        case(0x2D):
+            if((reg->CC.N ^ reg->CC.V) == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BGT - Greater than zero
+        case(0x2E):
+            if((reg->CC.Z + (reg->CC.N ^ reg->CC.V)) == 0)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+            
+        //BLE - Less or equal to zero
+        case(0x2F):
+            if((reg->CC.Z + (reg->CC.N ^ reg->CC.V)) == 1)
+                reg->PC = addr_dir();
+            else
+                reg->PC += 2;
+            break;
+        
+        /*
+         * Subroutine and interrupts
+         */
+        case(0x8D):     //BSR - Branch to subroutine
+            break;
+        case(0x6E):     //JMP - Jump (index)
+            break;
+        case(0x7E):     //JMP - Jump (extended)
+            reg->PC = mem[addr_ext()];
+            break;
+        case(0xAD):     //JSR - Jump to subroutine (index)
+            break;
+        case(0xBD):     //JSR - Jump to subroutine (extended)
+            stack_push(reg->PC & 0xFF);
+            stack_push((reg->PC >> 8) & 0xFF);
+            reg->PC = (mem[reg->PC + 1] << 8) + mem[reg->PC + 2];
+            break;
+        case(0x01):     //NOP - No operation (inher)
+            reg->PC++;
+            break;
+        case(0x3B):     //RTI - Return from interrupt (inher)
+            break;
+        case(0x39):     //RTS - Return from subroutine (inher)
+            addr = stack_pop() << 8;
+            addr += stack_pop();
+            reg->PC = addr;
+            break;
+        case(0x3F):     //SWI - Software interrupt (inher)
+            break;
+        case(0x3E):     //WAI - Wait for interrupr (inher)
+
+
+        /* 
+         * Index register and stack pointer 
+         */
+
+         
+        /* CPX - Compare index register */
+        //Immediate
+        case(0x8C):
+            temp = mem[reg->PC + 1];
+            reg->PC += 2;
+            
+        //Direct
+        case(0x9C):
+            if(temp == -1)
+            {
+                temp = mem[addr_dir()];
+                reg->PC += 2;
+            }
+            
+        //Index
+        case(0xAC):
+            if(temp == -1)
+            {
+                temp = mem[reg->X + addr_dir()];
+                reg->PC += 2;
+            }
+            
+        //Extended
+        case(0xBC):
+            if(temp == -1)
+            {
+                temp = mem[addr_ext()];
+                reg->PC += 3;
+            }
+            
+            //Comparison value retrieved, update CC flags
+            if(reg->X == temp)
+            {
+                reg->CC.N = 0;
+                reg->CC.Z = 1;
+                reg->CC.V = 0;
+            }
+            else if(reg->X < temp)
+            {
+                reg->CC.N = 1;
+                reg->CC.Z = 0;
+                reg->CC.V = 0;
+            }
+            else
+            {
+                reg->CC.N = 0;
+                reg->CC.Z = 0;
+                reg->CC.V = 0;
+            }
+            
+            break;
+            
+
+
+        
+
+
+        
+        case(0xCE):     //LDX - Load index register (immed)
+            break;
+        case(0xDE):     //LDX - Load index register (direct)
+            break;
+        case(0xEE):     //LDX - Load index register (index)
+            break;
+        case(0xFE):     //LDX - Load index register (extended)
+            addr = addr_ext();
+            reg->X = (mem[addr] << 8) + mem[addr + 1];
+            reg->PC += 3;
+            break;
+
+        
+        case(0x8E):     //LDX - Load stack pointer (immed)
+            break;
+        case(0x9E):     //LDX - Load stack pointer (direct)
+            break;
+        case(0xAE):     //LDX - Load stack pointer (index)
+            break;
+        case(0xBE):     //LDX - Load stack pointer (extended)
+            break;
+        
+        
+        
+        case(0xDF):     //STX - Store index register (direct)
+            break;
+        case(0xEF):     //STX - Store index register (index)
+            break;
+        case(0xFF):     //STX - Store index register (extended)
+            break;
+        
+    
+        
+        case(0x9F):     //STS - Store stack pointer (direct)
+            break;
+        case(0xAF):     //STS - Store stack pointer (index)
+            break;
+        case(0xBF):     //STS - Store stack pointer (extended)
+            break;
+        
+        
+        
+        case(0x35):     //TXS - Index reg -> stack pointer (inher)
+            break;
+        case(0x30):     //TSX - Stack pointer -> index reg (inher)
+            break;
+
+        case(0x09):     //DEX - Decrement index register (inher)
+            reg->X--;
+            reg->PC++;
+            break;
+        case(0x34):     //DES - Decrement stack pointer (inher)
+            reg->SP--;
+            reg->PC++;
+            break;
+        case(0x08):     //INX - Increment index register (inher)
+            reg->X++;
+            reg->PC++;
+            break;
+        case(0x31):     //INS - Increment stack pointer (inher)
+            reg->SP++;
+            reg->PC++;
+            break;
+        
+
+        default:
+            break;
+            
+    }
+    
+    if (pc == reg->PC)
+    {
+        printf("Unimplemented opcode 0x%02X at 0x%04X\n", reg->IR, reg->PC);
+        exit(-1);
     }
 }
 
