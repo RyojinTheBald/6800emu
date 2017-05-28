@@ -188,7 +188,7 @@ void do_step(registers_t *reg, uint8_t *mem)
                 break;
             }
             
-            //EOR
+            //EOR - Logical XOR against accumulator
             case(0x08):
             {
                 uint8_t tmp = (*Acc) ^ mem[addr];
@@ -199,32 +199,97 @@ void do_step(registers_t *reg, uint8_t *mem)
                 break;
             }
 
-            //ADC
+            //ADC - Add to accumulator, with carry
             case(0x09):
+            {
+                uint8_t tmp = (*Acc) + mem[addr] + reg->CC.C;
+                reg->CC.N = (tmp & 0x80) != 0;              //Set negative flag
+                reg->CC.Z = (tmp == 0);                     //Set zero flag
+                reg->CC.C = (tmp & 0x80) != (*Acc & 0x80);  //Set carry flag
+                reg->CC.V = ((*Acc & 0x80) == (TWO_COMP(mem[addr]) & 0x80)) && ((*Acc & 0x80) != (tmp & 0x80));
+                /*
+                 * TODO: Add half-carry flag logic
+                 */
+                *Acc = tmp;
                 break;
+            }
 
-            //ORA
+            //ORA - Logical inclusive-OR against accumulator
             case(0x0A):
+            {
+                uint8_t tmp = (*Acc) | mem[addr];
+                reg->CC.N = (tmp & 0x80) != 0;              //Set negative flag
+                reg->CC.Z = (tmp == 0);                     //Set zero flag
+                reg->CC.V = 0;                              //Reset overflow flag
+                *Acc = tmp;
                 break;
+            }
 
-            //ADD
+            //ADD - Add to accumulator
             case(0x0B):
+            {
+                uint8_t tmp = (*Acc) + mem[addr];
+                reg->CC.N = (tmp & 0x80) != 0;              //Set negative flag
+                reg->CC.Z = (tmp == 0);                     //Set zero flag
+                reg->CC.C = (tmp & 0x80) != (*Acc & 0x80);  //Set carry flag
+                reg->CC.V = ((*Acc & 0x80) == (TWO_COMP(mem[addr]) & 0x80)) && ((*Acc & 0x80) != (tmp & 0x80));
+                /*
+                 * TODO: Add half-carry flag logic
+                 */
+                *Acc = tmp;
                 break;
+            }
             
-            //CPX
+            //CPX - Compare index register
             case(0x0C):
+            {
+                uint16_t tmp = reg->X - ((mem[addr] << 8) + mem[addr + 1]);
+                reg->CC.N = (tmp & 0x8000) != 0;              //Set negative flag
+                reg->CC.Z = (tmp == 0);                     //Set zero flag
+
+                //Set overflow flag - christ this is a mess
+                reg->CC.V = (reg->X & 0x8000) && !(mem[addr] & 0x80) && (!(tmp & 0x8000) + !(reg->X & 0x8000)) && (mem[addr] & 0x80) && (tmp & 0x80);
+                
+                reg->X = tmp;
+                
+                //needed because of the extra length of immediate mode paramater
+                if ((reg->IR & 0x30) == 0)
+                    reg->PC++;
+                    
                 break;
+            }
             
-            //BSR
+            //BSR - Branch to subroutine
             case(0x0D):
             
-            //LDS/LDX
+            //LDS/LDX - Load stack pointer/index register
             case(0x0E):
-            
-            //STS/STX
-            case(0x0F):
+            {
+                uint16_t *tmp = (reg->IR & 0x40) ? &reg->SP : &reg->X;
+                *tmp = ((mem[addr] << 8) + mem[addr + 1]);
+
+                reg->CC.N = (*tmp & 0x8000) != 0; //bit 15 == 1
+                reg->CC.Z = (*tmp == 0);
+                reg->CC.V = 0;
+                
                 break;
-                        
+            }
+
+            
+            //STS/STX - Store stack pointer/index register
+            case(0x0F):
+            {
+                uint16_t *tmp = (reg->IR & 0x40) ? &reg->SP : &reg->X;
+                mem[addr] = ((*tmp >> 8) & 0xFF);
+                mem[addr + 1] = (*tmp & 0xFF);
+
+
+                reg->CC.N = (*tmp & 0x8000) != 0; //bit 15 == 1
+                reg->CC.Z = (*tmp == 0);
+                reg->CC.V = 0;
+                
+                break;
+            }           
         }
     }
     else
@@ -261,48 +326,6 @@ void do_step(registers_t *reg, uint8_t *mem)
                 reg->CC.Z = (reg->A == 0);
                 reg->PC++;
                 break;
-            case(0x96):     //LDA A - direct
-            {
-                reg->A = mem[ADDR_DIR()];
-                reg->PC++;
-                break;
-            }
-            case(0xD6):     //LDA B - direct
-            {
-                reg->B = mem[ADDR_DIR()];
-                reg->PC +=2;
-                break;
-            }
-            case(0xA6):     //LDAA - index
-            {
-                reg->A = mem[reg->X + mem[reg->PC + 1]];
-                reg->PC += 2;
-                break;
-            }
-            case(0xA7):     //STAA - index
-            {
-                mem[reg->X + mem[reg->PC + 1]] = reg->A;
-                reg->PC += 2;
-                break;
-            }
-            case(0xB6):     //LDAA - extended
-            {
-                reg->A = mem[ADDR_EXT()];
-                reg->PC += 3;
-                break;
-            }
-            case(0xB7):     //STAA - extended
-            {
-                mem[ADDR_EXT()] = reg->A;
-                reg->PC += 3;
-                break;
-            }
-            case(0xC6):     //LDAB - immediate
-            {
-                reg->B = mem[reg->PC + 1];
-                reg->PC += 2;
-                break;
-            }
             case(0x36):     //PSHA - Implied
             {
                 STACK_PUSH(reg->A);
@@ -315,16 +338,7 @@ void do_step(registers_t *reg, uint8_t *mem)
                 reg->PC++;
                 break;
             }
-            case(0xB1):     //CMPA - extended
-            {
-                temp = reg->A - mem[ADDR_EXT()];
-                reg->CC.N = (temp & 128) != 0;    //Set negative flag
-                reg->CC.Z = (temp == 0);            //Set zero flag
-                reg->CC.C = (temp & 128) != (reg->A & 128);   //Set carry flag
-                reg->PC += 3;
-                break;
-            }
-             case(0x32):     //PULA - Implied
+            case(0x32):     //PULA - Implied
             {
                 reg->A = STACK_POP();
                 reg->PC++;
@@ -333,12 +347,6 @@ void do_step(registers_t *reg, uint8_t *mem)
             case(0x7C):     //INC - extended
             {
                 mem[ADDR_EXT()]++;
-                reg->PC += 3;
-                break;
-            }
-            case(0xF6):     //LDAB - extended
-            {
-                reg->B = mem[ADDR_EXT()];
                 reg->PC += 3;
                 break;
             }
@@ -520,198 +528,8 @@ void do_step(registers_t *reg, uint8_t *mem)
             /* 
              * Index register and stack pointer 
              */
-             
-            //CPX - Compare index register (Immediate)
-            case(0x8C):
-                temp = mem[reg->PC + 1];
-                reg->PC += 2;
-                
-            //CPX - Compare index register (Direct)
-            case(0x9C):
-                if(temp == -1)
-                {
-                    temp = mem[ADDR_DIR()];
-                    reg->PC += 2;
-                }
-                
-            //CPX - Compare index register (Index)
-            case(0xAC):
-                if(temp == -1)
-                {
-                    temp = mem[reg->X + ADDR_DIR()];
-                    reg->PC += 2;
-                }
-                
-            //CPX - Compare index register (Extended)
-            case(0xBC):
-                if(temp == -1)
-                {
-                    temp = mem[ADDR_EXT()];
-                    reg->PC += 3;
-                }
-                
-                //Comparison value retrieved, update CC flags
-                if(reg->X == temp)
-                {
-                    reg->CC.N = 0;
-                    reg->CC.Z = 1;
-                    reg->CC.V = 0;
-                }
-                else if(reg->X < temp)
-                {
-                    reg->CC.N = 1;
-                    reg->CC.Z = 0;
-                    reg->CC.V = 0;
-                }
-                else
-                {
-                    reg->CC.N = 0;
-                    reg->CC.Z = 0;
-                    reg->CC.V = 0;
-                }
-                
-                break;
-                
-
-            //LDX - Load index register (Immediate)
-            case(0xCE):
-                temp = mem[reg->PC + 1];
-                reg->PC += 2;
-                
-            //LDX - Load index register (Direct)
-            case(0xDE):
-                if(temp == -1)
-                {
-                    temp = mem[ADDR_DIR()];
-                    reg->PC += 2;
-                }
-                
-            //LDX - Load index register (Index)
-            case(0xEE):
-                if(temp == -1)
-                {
-                    temp = mem[reg->X + ADDR_DIR()];
-                    reg->PC += 2;
-                }
-                
-            //LDX - Load index register (Extended)
-            case(0xFE):
-                if(temp == -1)
-                {
-                    temp = mem[ADDR_EXT()];
-                    reg->PC += 3;
-                }
-            
-                reg->X = temp & 0xFFFF;
-                
-                reg->CC.N = (reg->X & 0x8000) != 0; //bit 15 == 1
-                reg->CC.Z = (reg->X == 0);
-                reg->CC.V = 0;
-
-                break;
 
 
-            //LDS - Load stack pointer (Immediate)
-            case(0x8E):
-                temp = mem[reg->PC + 1];
-                reg->PC += 2;
-                
-            //LDS - Load stack pointer (Direct)
-            case(0x9E):
-                if(temp == -1)
-                {
-                    temp = mem[ADDR_DIR()];
-                    reg->PC += 2;
-                }
-                
-            //LDS - Load stack pointer (Index)
-            case(0xAE):
-                if(temp == -1)
-                {
-                    temp = mem[reg->X + ADDR_DIR()];
-                    reg->PC += 2;
-                }
-                
-            //LDS - Load stack pointer (Extended)
-            case(0xBE):
-                if(temp == -1)
-                {
-                    temp = mem[ADDR_EXT()];
-                    reg->PC += 3;
-                }
-            
-                reg->SP = temp & 0xFFFF;
-
-                reg->CC.N = (reg->SP & 0x8000) != 0; //bit 15 == 1
-                reg->CC.Z = (reg->SP == 0);
-                reg->CC.V = 0;
-
-                break;
-           
-            
-            //STX - Store index register (Direct)
-            case(0xDF):
-                temp = ADDR_DIR();
-                reg->PC += 2;
-                
-            //STX - Store index register (Index)
-            case(0xEF):
-                if(temp == -1)
-                {
-                    temp = reg->X + ADDR_DIR();
-                    reg->PC += 2;
-                }
-                
-            //STX - Store index register (Extended)
-            case(0xFF):
-                if(temp == -1)
-                {
-                    temp = ADDR_EXT();
-                    reg->PC += 3;
-                }        
-            
-                mem[temp] = ((reg->X >> 8) & 0xFF);
-                mem[temp + 1] = (reg->X & 0xFF);
-
-
-                reg->CC.N = (reg->X & 0x8000) != 0; //bit 15 == 1
-                reg->CC.Z = (reg->X == 0);
-                reg->CC.V = 0;
-                
-                break;
-            
-        
-            //STS - Store stack pointer (Direct)
-            case(0x9F):
-                temp = ADDR_DIR();
-                reg->PC += 2;
-                
-            //STS - Store stack pointer (Index)
-            case(0xAF):
-                if(temp == -1)
-                {
-                    temp = reg->X + ADDR_DIR();
-                    reg->PC += 2;
-                }
-                
-            //STS - Store stack pointer (Extended)
-            case(0xBF):
-                if(temp == -1)
-                {
-                    temp = ADDR_EXT();
-                    reg->PC += 3;
-                }        
-            
-                mem[temp] = ((reg->SP >> 8) & 0xFF);
-                mem[temp + 1] = (reg->SP & 0xFF);
-
-                reg->CC.N = (reg->SP & 0x8000) != 0; //bit 15 == 1
-                reg->CC.Z = (reg->SP == 0);
-                reg->CC.V = 0;
-                
-                break;
-            
-            
             //TXS - Index reg -> stack pointer (Implied)
             case(0x35):
                 reg->SP = reg->X;
