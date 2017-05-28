@@ -232,7 +232,7 @@ void do_step(registers_t *reg, uint8_t *mem)
                 uint8_t tmp = (*Acc) + mem[addr];
                 reg->CC.N = (tmp & 0x80) != 0;              //Set negative flag
                 reg->CC.Z = (tmp == 0);                     //Set zero flag
-                reg->CC.C = (tmp & 0x80) != (*Acc & 0x80);  //Set carry flag
+                reg->CC.C = ((*Acc & 0x80) && (mem[addr] & 0x80)) + ((mem[addr] & 0x80) && !(tmp & 0x80)) + (!(tmp & 0x80) && (*Acc & 0x80));
                 reg->CC.V = ((*Acc & 0x80) == (TWO_COMP(mem[addr]) & 0x80)) && ((*Acc & 0x80) != (tmp & 0x80));
                 /*
                  * TODO: Add half-carry flag logic
@@ -363,7 +363,7 @@ void do_step(registers_t *reg, uint8_t *mem)
             //BEQ - Branch if equals zero
             case(0x27):
                 if(reg->CC.Z == 1)
-                    reg->PC = addr_rel;
+                    reg->PC += addr_rel;
                 break;
                 
             //BVC - Branch if overflow clear
@@ -488,13 +488,24 @@ void do_step(registers_t *reg, uint8_t *mem)
             }
             case(0x7C):     //INC - extended
             {
-                mem[ADDR_EXT()]++;
+                uint8_t temp = mem[ADDR_EXT()] + 1;
+                reg->CC.N = (temp & 128) != 0;    //Set negative flag
+                reg->CC.Z = (temp == 0);            //Set zero flag
+                reg->CC.C = (temp & 128) != (mem[ADDR_EXT()] & 128);   //Set carry flag
+                
+                mem[ADDR_EXT()] = temp;
+
                 reg->PC += 3;
                 break;
             }
             case(0x7F):     //CLR - extended
             {
                 mem[ADDR_EXT()] = 0;
+                reg->CC.N = 0;    //Set negative flag
+                reg->CC.Z = 1;            //Set zero flag
+                reg->CC.C = 0;   //Set carry flag
+
+
                 reg->PC += 3;
                 break;
             }
@@ -723,7 +734,7 @@ void printScreen(uint8_t *mem)
     {
         for (int x = 0; x < 54; x++)
         {
-            printf("%c", mem[0xFB00 + (y * 54) +x]);
+            printf("%c", mem[0xFB00 + (y * 54) + x]);
         }
         printf("\n");
     }
@@ -759,14 +770,20 @@ int main(int argc, char **argv)
 
         
         do_step(&reg, mem);
+
+
         printScreen(mem);
-        //printf("A:0x%02X B:0x%02X PC:0x%04X X:0x%04X SP:0x%04X IR:0x%02X    H:%d I:%d N:%d Z:%d V:%d C:%d\n", reg.A, reg.B, reg.PC, reg.X, reg.SP, reg.IR, reg.CC.H, reg.CC.I, reg.CC.N, reg.CC.Z, reg.CC.V, reg.CC.C);                
-        
-        if (breakpoint > 0 && !stepping && reg.PC == breakpoint)
+        printf("A:0x%02X B:0x%02X PC:0x%04X X:0x%04X SP:0x%04X IR:0x%02X    H:%d I:%d N:%d Z:%d V:%d C:%d\n", reg.A, reg.B, reg.PC, reg.X, reg.SP, reg.IR, reg.CC.H, reg.CC.I, reg.CC.N, reg.CC.Z, reg.CC.V, reg.CC.C);                
+
+
+        if (!stepping && ((breakpoint > 0 && reg.PC == breakpoint)))
         {
             stepping = 1;
             printf("Breakpoint reached, press any key to step execution\n");
         }
+
+            
+        
             
         if (stepping)
         {
