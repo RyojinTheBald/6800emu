@@ -43,6 +43,8 @@ typedef struct{
         uint8_t V: 1;  //Overflow
         uint8_t C: 1;  //Carry
     } CC;
+    
+    uint8_t Running;
 } registers_t;
 
 
@@ -55,19 +57,15 @@ typedef struct{
 #define STACK_PUSH(in)  (mem[reg->SP--] = (in))
 #define STACK_POP()     (mem[++reg->SP])
 
-//#define CALC_C(A, B, R)     (((A) & 0x80) && ((B) & 0x80)) + (((B) & 0x80) && (!((R) & 0x80))) + ((!((R) & 0x80)) && ((A) & 0x80))
-
-
-#define CALC_C(A, B, R)     (!((A) & 0x80) && ((B) & 0x80)) + (((B) & 0x80) && ((R) & 0x80)) + (((R) & 0x80) && !((A) & 0x80))
-
-#define CALC_V(A, B, R)     (((A) & 0x80) && ((B) & 0x80) && ((!((R) & 0x80)) + (!((A) & 0x80))) && ((!((B) & 0x80)) && ((R) & 0x80)))
-#define CALC_Z(R)           ((R) == 0)
-#define CALC_N(R)           (((R) & 0x80) != 0)
-#define CALC_H(A, B, R)     ((((A) & 0x08) && ((B) & 0x08)) + (((B) & 0x08) && (!((R) & 0x08))) + ((!((R) & 0x08)) & ((A) & 0x08)))
 
 void irq(registers_t* reg, uint8_t *mem)
 {
-    
+    //Interrupt mask not set, process interrupt
+    if (!reg->CC.I)
+    {
+        reg->CC.I = 1;
+        reg->Running = 1;
+    }
 }
 
 void irq_nonmasked(registers_t* reg, uint8_t *mem)
@@ -75,7 +73,7 @@ void irq_nonmasked(registers_t* reg, uint8_t *mem)
     
 }
 
-void do_step(registers_t *reg, uint8_t *mem)
+uint8_t do_step(registers_t *reg, uint8_t *mem)
 {
     uint8_t num_cycles = 0;
     
@@ -88,17 +86,18 @@ void do_step(registers_t *reg, uint8_t *mem)
     //Condition code instructions (and friends)
     if ((reg->IR & 0xF0) == 0x00)
     {
-        num_cycles = 2;
         reg->PC++;
 
         switch(reg->IR)
         {
             //NOP - No operation
             case(0x01):
+                num_cycles = 2;
                 break;
 
             //TAP - CC = Accumulator A
             case(0x06):
+                num_cycles = 2;
                 reg->CC.H = (reg->A & 0x32) >> 5;
                 reg->CC.I = (reg->A & 0x16) >> 4;
                 reg->CC.N = (reg->A & 0x08) >> 3;
@@ -109,6 +108,7 @@ void do_step(registers_t *reg, uint8_t *mem)
             
             //TPA - Accumulator A = CC
             case(0x07):
+                num_cycles = 2;
                 reg->A = reg->CC.H << 5;
                 reg->A += reg->CC.I << 4;
                 reg->A += reg->CC.N << 3;
@@ -137,31 +137,37 @@ void do_step(registers_t *reg, uint8_t *mem)
             
             //CLV - Clear overflow
             case(0x0A):
+                num_cycles = 2;
                 reg->CC.V = 0;
                 break;
             
             //SEV - Set overflow
             case(0x0B):
+                num_cycles = 2;
                 reg->CC.V = 1;
                 break;
             
             //CLC - Clear carry
             case(0x0C):
+                num_cycles = 2;
                 reg->CC.C = 0;
                 break;
             
             //SEC - Set carry
             case(0x0D):
+                num_cycles = 2;
                 reg->CC.C = 1;
                 break;
             
             //CLI - Clear interrupt
             case(0x0E):
+                num_cycles = 2;
                 reg->CC.I = 0;
                 break;
             
             //SEI - Set interrupt
             case(0x0F):
+                num_cycles = 2;
                 reg->CC.I = 1;
                 break;
         }
@@ -174,13 +180,18 @@ void do_step(registers_t *reg, uint8_t *mem)
     {
         switch(reg->IR)
         {
-            case(0x10):     //SBA
+            //SBA - Subtract reg->B from reg->A
+            case(0x10):
             {
-                temp = reg->A + TWO_COMP(reg->B);
-                reg->CC.N = (temp & 128) != 0;
-                reg->CC.Z = (temp == 0);
-                reg->CC.C = (temp & 128) != (reg->A & 128);
-                reg->A = temp;
+                num_cycles = 2;
+                uint8_t A = reg->A, B = TWO_COMP(reg->B), R = A + B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = ((A & 0x80) && !(B & 0x80) && !(R & 0x80)) + (!(A & 0x80) && (B & 0x80) && (R & 0x80));
+                reg->CC.C = (!(A & 0x80) && (B & 0x80)) + ((B & 0x80) && (R & 0x80)) + ((R & 0x80) && !(A & 0x80));
+
+                reg->A = R;
                 reg->PC++;
                 break;
             }
@@ -189,35 +200,66 @@ void do_step(registers_t *reg, uint8_t *mem)
             case(0x11):
             {
                 num_cycles = 2;
-                uint8_t R = reg->A + TWO_COMP(reg->B);
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.V = CALC_V(reg->A, reg->B, R);
-                reg->CC.C = CALC_C(reg->A, reg->B, R);
+                uint8_t A = reg->A, B = TWO_COMP(reg->B), R = A + B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = ((A & 0x80) && !(B & 0x80) && !(R & 0x80)) + (!(A & 0x80) && (B & 0x80) && (R & 0x80));
+                reg->CC.C = (!(A & 0x80) && (B & 0x80)) + ((B & 0x80) && (R & 0x80)) + ((R & 0x80) && !(A & 0x80));
+
                 reg->PC++;
                 break;
             }
+            /*
             case(0x14):     //NBA
                 reg->A &= reg->B;
                 reg->CC.Z = (reg->A == 0);
                 reg->PC++;
                 break;
+            */
+            
+            //TAB - Transfer reg->A to reg->B
+            case(0x16):
+            {
+                num_cycles = 2;
+                reg->A = reg->B;
+                
+                reg->CC.N = (reg->A & 0x80) != 0;
+                reg->CC.Z = reg->A == 0;
+                reg->CC.V = 0;
+
+                reg->PC++;
+                break;
+            }
+            
+            //TBA - Transfer reg->B to reg->A
+            case(0x17):
+            {
+                num_cycles = 2;
+                reg->B = reg->A;
+
+                reg->CC.N = (reg->B & 0x80) != 0;
+                reg->CC.Z = reg->B == 0;
+                reg->CC.V = 0;
+                
+                reg->PC++;
+                break;
+            }
             
             //ABA - Add accumulator B to A
             case(0x1B):
             {
-                uint8_t result = reg->A + reg->B;
-                
-                //Set condition-codes
-                reg->CC.N = CALC_N(result);
-                reg->CC.Z = CALC_Z(result);
-                reg->CC.C = CALC_C(reg->A, reg->B, result);
-                reg->CC.V = CALC_V(reg->A, reg->B, result);
-                reg->CC.H = CALC_H(reg->A, reg->B, result);
-                
-                //Number of clock cycles required
                 num_cycles = 2;
+                uint8_t A = reg->A, B = reg->B, R = A + B;
                 
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = ((A & 0x80) && (B & 0x80) && !(R & 0x80)) + (!(A & 0x80) && !(B & 0x80) && (R & 0x80));
+                reg->CC.C = ((A & 0x80) && (B & 0x80)) + ((B & 0x80) && !(R & 0x80)) + (!(R & 0x80) && (A & 0x80));
+                reg->CC.H = ((A & 0x08) && (B & 0x08)) + ((B & 0x08) && !(R & 0x08)) + (!(R & 0x08) && (A & 0x08));
+
+                reg->A = R;
+
                 reg->PC++;
                 break;
             }
@@ -343,12 +385,14 @@ void do_step(registers_t *reg, uint8_t *mem)
             
             case(0x36):     //PSHA - Implied
             {
+                num_cycles = 4;
                 STACK_PUSH(reg->A);
                 reg->PC++;
                 break;
             }
             case(0x37):     //PSHB - B -> stack
             {
+                num_cycles = 4;
                 STACK_PUSH(reg->B);
                 reg->PC++;
                 break;
@@ -356,12 +400,14 @@ void do_step(registers_t *reg, uint8_t *mem)
 
             case(0x32):     //PULA - Implied
             {
+                num_cycles = 4;
                 reg->A = STACK_POP();
                 reg->PC++;
                 break;
             }
             case(0x33):     //PULB - Implied
             {
+                num_cycles = 4;
                 reg->B = STACK_POP();
                 reg->PC++;
                 break;
@@ -370,41 +416,117 @@ void do_step(registers_t *reg, uint8_t *mem)
 
             //RTI - Return from interrupt (Implied)
             case(0x3B):
+            {
+                num_cycles = 10;
+                
+                uint8_t CC = STACK_POP();
+
+                reg->CC.H = (CC & 0x32) >> 5;
+                reg->CC.I = (CC & 0x16) >> 4;
+                reg->CC.N = (CC & 0x08) >> 3;
+                reg->CC.Z = (CC & 0x04) >> 2;
+                reg->CC.V = (CC & 0x02) >> 1;
+                reg->CC.C = CC & 0x01;
+
+                reg->B = STACK_POP();
+                reg->A = STACK_POP();
+                reg->X = (STACK_POP() << 8);
+                reg->X += STACK_POP();
+                reg->PC = STACK_POP() << 8;
+                reg->PC += STACK_POP();
                 break;
+            }
             
             //RTS - Return from subroutine (Implied)
             case(0x39):
-                addr = STACK_POP() << 8;
-                addr += STACK_POP();
-                reg->PC = addr;
+            {
+                num_cycles = 5;
+                reg->PC = STACK_POP() << 8;
+                reg->PC += STACK_POP();
                 break;
+            }
             
             //SWI - Software interrupt (Implied)
             case(0x3F):
+            {
+                num_cycles = 12;
+                
+                //Save processor state to stack
+                STACK_PUSH((reg->PC + 1) & 0x00FF);
+                STACK_PUSH(((reg->PC + 1) & 0xFF00) >> 8);
+                STACK_PUSH(reg->X & 0x00FF);
+                STACK_PUSH((reg->X & 0xFF00) >> 8);
+                STACK_PUSH(reg->A);
+                STACK_PUSH(reg->B);
+
+                uint8_t CC = reg->CC.H << 5;
+                CC += reg->CC.I << 4;
+                CC += reg->CC.N << 3;
+                CC += reg->CC.Z << 2;
+                CC += reg->CC.V << 1;
+                CC += reg->CC.C;
+
+                STACK_PUSH(CC);
+
+                reg->CC.I = 1;
+                
+                //Jump to software interrupt pointer
+                reg->PC = (mem[0x10000 - 5] << 8) + mem[0x10000 - 4];
+            
                 break;
+            }
             
             //WAI - Wait for interrupt (Implied)
             case(0x3E):
-                break;
+            {
+                num_cycles = 9;
+                //Save processor state to stack
+                STACK_PUSH((reg->PC + 1) & 0x00FF);
+                STACK_PUSH(((reg->PC + 1) & 0xFF00) >> 8);
+                STACK_PUSH(reg->X & 0x00FF);
+                STACK_PUSH((reg->X & 0xFF00) >> 8);
+                STACK_PUSH(reg->A);
+                STACK_PUSH(reg->B);
 
+                uint8_t CC = reg->CC.H << 5;
+                CC += reg->CC.I << 4;
+                CC += reg->CC.N << 3;
+                CC += reg->CC.Z << 2;
+                CC += reg->CC.V << 1;
+                CC += reg->CC.C;
+
+                STACK_PUSH(CC);
+
+                //Jump to internal interrupt pointer
+                reg->PC = (mem[0x10000 - 7] << 8) + mem[0x10000 - 6];
+                
+                //Halt execution to wait for interrupt
+                reg->Running = 0;
+            
+                break;
+        }
             //TXS - Index reg -> stack pointer (Implied)
             case(0x35):
+                num_cycles = 4;
                 reg->SP = reg->X;
                 break;
                 
             //TSX - Stack pointer -> index reg (Implied)
             case(0x30):
+                num_cycles = 4;
                 reg->X = reg->SP;
                 break;
 
             //DES - Decrement stack pointer (Implied)
             case(0x34):
+                num_cycles = 4;
                 reg->SP--;
                 reg->PC++;
                 break;
 
             //INS - Increment stack pointer (Implied)
             case(0x31):
+                num_cycles = 4;
                 reg->SP++;
                 reg->PC++;
                 break;
@@ -454,11 +576,12 @@ void do_step(registers_t *reg, uint8_t *mem)
             case(0x00):
             {
                 uint8_t R = TWO_COMP(*X);
+
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0x00;
+                reg->CC.V = *X == 0x80;
+                reg->CC.C = *X != 0x00;
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.V = CALC_V(0, TWO_COMP(*X), R);
-                reg->CC.C = !(*X == 0);
                 break;
             }
             
@@ -467,10 +590,11 @@ void do_step(registers_t *reg, uint8_t *mem)
             {
                 uint8_t R = ONE_COMP(*X);
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0x00;
                 reg->CC.V = 0;
                 reg->CC.C = 1;
+                
                 break;
             }
             
@@ -482,8 +606,10 @@ void do_step(registers_t *reg, uint8_t *mem)
                 uint8_t R = *X >> 1;
                 
                 reg->CC.N = 0;
-                reg->CC.Z = CALC_Z(R);
+                reg->CC.Z = R == 0x00;
                 reg->CC.V = reg->CC.N ^ reg->CC.C;
+                
+                *X = R;
                 break;
             }
             
@@ -495,9 +621,11 @@ void do_step(registers_t *reg, uint8_t *mem)
                 uint8_t R = *X >> 1;
                 R += reg->CC.C * 0x80;
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0x00;
                 reg->CC.V = reg->CC.N ^ reg->CC.C;
+                
+               *X = R; 
                 break;
             }
             
@@ -508,8 +636,8 @@ void do_step(registers_t *reg, uint8_t *mem)
                 
                 uint8_t R = (*X >> 1) + (*X & 0x80);
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0x00;
                 reg->CC.V = reg->CC.N ^ reg->CC.C;
                 
                 *X = R;
@@ -523,8 +651,8 @@ void do_step(registers_t *reg, uint8_t *mem)
                 
                 uint8_t R = *X << 1;
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0x00;
                 reg->CC.V = reg->CC.N ^ reg->CC.C;
                 
                 *X = R;
@@ -539,45 +667,48 @@ void do_step(registers_t *reg, uint8_t *mem)
                 uint8_t R = *X << 1;
                 R += reg->CC.C;
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0x00;
                 reg->CC.V = reg->CC.N ^ reg->CC.C;
+                
+                *X = R;
                 break;
             }
 
             //DEC - Decrement
             case(0x0A):
             {
-                uint8_t R = *X + TWO_COMP(1);
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.V = CALC_V(*X, TWO_COMP(1), R);
+                uint8_t A = *X, B = TWO_COMP(1), R = A + B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = (*X == 0x80) && (R == 0x7F);
                 
                 *X = R;
-
                 break;
             }
             
             //INC - Increment
             case(0x0C):
             {
-                uint8_t R = *X + 1;
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.V = CALC_V(*X, 1, R);
+                uint8_t A = *X, B = 1, R = A + B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = A == 0x7F;
                 
                 *X = R;
-
                 break;
             }
 
             //TST - Test
             case(0x0D):
             {
-                reg->CC.N = CALC_N(*X);
-                reg->CC.Z = CALC_Z(*X);
+                reg->CC.N = (*X & 0x80) != 0;
+                reg->CC.Z = *X == 0;
                 reg->CC.V = 0;
                 reg->CC.C = 0;
+                
                 break;
             }
 
@@ -586,7 +717,8 @@ void do_step(registers_t *reg, uint8_t *mem)
             case(0x0E):
             {
                 num_cycles -= 3;
-                reg->PC = *X;
+                reg->PC = X - mem; //get memory offset from variable pointer
+                
                 break;
             }
             
@@ -652,61 +784,52 @@ void do_step(registers_t *reg, uint8_t *mem)
             //SUB - Subtract memory from accumulator
             case(0x00):
             {
-                uint8_t tmp = (*Acc) + TWO_COMP(mem[addr]);
-                reg->CC.N = (tmp & 0x80) != 0;
-                reg->CC.Z = (tmp == 0);
-                reg->CC.C = (tmp & 0x80) != (*Acc & 0x80);
-                reg->CC.V = ((*Acc & 0x80) == (TWO_COMP(mem[addr]) & 0x80)) && ((*Acc & 0x80) != (tmp & 0x80));
-                *Acc = tmp;
+                uint8_t A = *Acc, B = TWO_COMP(mem[addr]), R = A + B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = (A & 0x80) && !(B & 0x80) && !(R & 0x80) && !(A & 0x80) && (B & 0x80) && (R & 0x80);
+                reg->CC.C = (!(A & 0x80) && (B & 0x80)) + ((B & 0x80) && (R & 0x80)) + ((R & 0x80) && !(A & 0x80));
+                
+                *Acc = R;
                 break;
             }
             
             //CMP - Compare memory to accumulator
             case(0x01):
             {
-                uint8_t R = *Acc + TWO_COMP(mem[addr]);
+                uint8_t A = *Acc, B = TWO_COMP(mem[addr]), R = A + B;
                 
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.C = CALC_C(*Acc, TWO_COMP(mem[addr]), R);
-                
-                //reg->CC.C = (!(*Acc & 0x80) && (mem[addr] & 0x80)) + ((mem[addr] & 0x80) && (R & 0x80)) + ((R & 0x80) && !(*Acc & 0x80));
-                
-                reg->CC.V = CALC_V(*Acc, TWO_COMP(mem[addr]), R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = (A & 0x80) && !(B & 0x80) && !(R & 0x80) && !(A & 0x80) && (B & 0x80) && (R & 0x80);
+                reg->CC.C = (!(A & 0x80) && (B & 0x80)) + ((B & 0x80) && (R & 0x80)) + ((R & 0x80) && !(A & 0x80));
+
                 break;
             }
             
             //SBC - Subtract memory from accumulator, with carry
             case(0x02):
             {
-                uint8_t tmp = (*Acc) + TWO_COMP(mem[addr] + reg->CC.C);
-                reg->CC.N = (tmp & 0x80) != 0;
-                reg->CC.Z = (tmp == 0);
-                reg->CC.C = (tmp & 0x80) != (*Acc & 0x80);
-                reg->CC.V = ((*Acc & 0x80) == (TWO_COMP(mem[addr]) & 0x80)) && ((*Acc & 0x80) != (tmp & 0x80));
-                *Acc = tmp;
+                uint8_t A = *Acc, B = TWO_COMP(mem[addr] + reg->CC.C), R = A + B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = (A & 0x80) && !(B & 0x80) && !(R & 0x80) && !(A & 0x80) && (B & 0x80) && (R & 0x80);
+                reg->CC.C = (!(A & 0x80) && (B & 0x80)) + ((B & 0x80) && (R & 0x80)) + ((R & 0x80) && !(A & 0x80));
+                
+                *Acc = R;
                 break;
             }
             
             //AND - Logical AND against accumulator
             case(0x04):
             {
-                uint8_t R = (*Acc) & mem[addr];
-
-               
-                //Set condition-codes
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                uint8_t A = *Acc, B = mem[addr], R = A & B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
                 reg->CC.V = 0;
-                
-                //Number of clock cycles required
-                num_cycles = 2;
-                
-                //Extra cycle required for extended mode
-                if (reg->IR & 0x30)
-                    num_cycles = 3;
-                
-                reg->PC++;
 
                 *Acc = R;
                 break;
@@ -715,10 +838,12 @@ void do_step(registers_t *reg, uint8_t *mem)
             //BIT - Bit test - Logical and without assignment
             case(0x05):
             {
-                uint8_t R = (*Acc) & mem[addr];
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                uint8_t A = *Acc, B = mem[addr], R = A & B;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
                 reg->CC.V = 0;
+                
                 break;
             }
             
@@ -726,9 +851,11 @@ void do_step(registers_t *reg, uint8_t *mem)
             case(0x06):
             {
                 uint8_t R = mem[addr];
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
                 reg->CC.V = 0;
+                
                 *Acc = R;
                 break;
             }
@@ -736,83 +863,68 @@ void do_step(registers_t *reg, uint8_t *mem)
             //STA - Store accumulator
             case(0x07):
             {
-                uint8_t tmp = *Acc;
-                reg->CC.N = (tmp & 0x80) != 0;
-                reg->CC.Z = (tmp == 0);
+                uint8_t R = *Acc;
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
                 reg->CC.V = 0;
-                mem[addr] = tmp;
+                
+                mem[addr] = R;
                 break;
             }
             
             //EOR - Logical XOR, memory against accumulator
             case(0x08):
             {
-                uint8_t tmp = (*Acc) ^ mem[addr];
-                reg->CC.N = (tmp & 0x80) != 0;
-                reg->CC.Z = (tmp == 0);
+                uint8_t R = (*Acc) ^ mem[addr];
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = (R == 0);
                 reg->CC.V = 0;
-                *Acc = tmp;
+                
+                *Acc = R;
                 break;
             }
 
             //ADC - Add memory to accumulator, with carry
             case(0x09):
             {
-                uint8_t R = (*Acc) + mem[addr] + reg->CC.C;
+                uint8_t A = *Acc, B = mem[addr], R = A + B + reg->CC.C;
                 
-                //Set condition-codes
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.C = CALC_C(*Acc, mem[addr], R);
-                reg->CC.V = CALC_V(*Acc, mem[addr], R);
-                reg->CC.H = CALC_H(*Acc, mem[addr], R);
-                
-                //Number of clock cycles required
-                num_cycles = 2;
-                
-                //Extra cycle required for extended mode
-                if (reg->IR & 0x30)
-                    num_cycles = 3;
-                
-                reg->PC++;
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = ((A & 0x80) && (B & 0x80) && !(R & 0x80)) + (!(A & 0x80) && !(B & 0x80) && (R & 0x80));
+                reg->CC.C = ((A & 0x80) && (B & 0x80)) + ((B & 0x80) && !(R & 0x80)) + (!(R & 0x80) && (A & 0x80));
+                reg->CC.H = ((A & 0x08) && (B & 0x08)) + ((B & 0x08) && !(R & 0x08)) + (!(R & 0x08) && (A & 0x08));
 
                 *Acc = R;
-
                 break;
             }
 
             //ORA - Logical inclusive-OR, memory against accumulator
             case(0x0A):
             {
-                uint8_t tmp = (*Acc) | mem[addr];
-                reg->CC.N = (tmp & 0x80) != 0;
-                reg->CC.Z = (tmp == 0);
+                uint8_t R = (*Acc) | mem[addr];
+                
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = (R == 0);
                 reg->CC.V = 0;
-                *Acc = tmp;
+                
+                *Acc = R;
                 break;
             }
 
             //ADD - Add memory to accumulator
             case(0x0B):
             {
-                uint8_t R = (*Acc) + mem[addr];
+                uint8_t A = *Acc, B = mem[addr], R = A + B;
                 
-                //Set condition-codes
-                reg->CC.N = CALC_N(R);
-                reg->CC.Z = CALC_Z(R);
-                reg->CC.C = CALC_C(*Acc, mem[addr], R);
-                reg->CC.V = CALC_V(*Acc, mem[addr], R);
-                reg->CC.H = CALC_H(*Acc, mem[addr], R);
+                reg->CC.N = (R & 0x80) != 0;
+                reg->CC.Z = R == 0;
+                reg->CC.V = ((A & 0x80) && (B & 0x80) && !(R & 0x80)) + (!(A & 0x80) && !(B & 0x80) && (R & 0x80));
+                reg->CC.C = ((A & 0x80) && (B & 0x80)) + ((B & 0x80) && !(R & 0x80)) + (!(R & 0x80) && (A & 0x80));
+                reg->CC.H = ((A & 0x08) && (B & 0x08)) + ((B & 0x08) && !(R & 0x08)) + (!(R & 0x08) && (A & 0x08));
                 
-                //Number of clock cycles required
-                num_cycles = 2;
-                
-                //Extra cycle required for extended mode
-                if (reg->IR & 0x30)
-                    num_cycles = 3;
-                
-                reg->PC++;
-
                 *Acc = R;
                 break;
             }
@@ -820,19 +932,16 @@ void do_step(registers_t *reg, uint8_t *mem)
             //CPX - Compare index register to memory
             case(0x0C):
             {
-                uint16_t tmp = reg->X - ((mem[addr] << 8) + mem[addr + 1]);
-                reg->CC.N = (tmp & 0x8000) != 0;
-                reg->CC.Z = (tmp == 0);
+                uint16_t R = reg->X - ((mem[addr] << 8) + mem[addr + 1]);
 
-                //Set overflow flag - christ this is a mess
-                reg->CC.V = (reg->X & 0x8000) && !(mem[addr] & 0x80) && (!(tmp & 0x8000) + !(reg->X & 0x8000)) && (mem[addr] & 0x80) && (tmp & 0x80);
-                
-                reg->X = tmp;
+                reg->CC.N = (R & 0x8000) != 0;
+                reg->CC.Z = (R == 0);
+                reg->CC.V = (reg->X & 0x8000) && !(mem[addr] & 0x80) && (!(R & 0x8000) + !(reg->X & 0x8000)) && (mem[addr] & 0x80) && (R & 0x80);
                 
                 //needed because of the extra length of immediate mode paramater
                 if ((reg->IR & 0x30) == 0)
                     reg->PC++;
-                    
+
                 break;
             }
             
@@ -856,11 +965,12 @@ void do_step(registers_t *reg, uint8_t *mem)
             //LDS/LDX - Load stack pointer/index register
             case(0x0E):
             {
-                uint16_t *tmp = (reg->IR & 0x40) ? &reg->X : &reg->SP;
-                *tmp = ((mem[addr] << 8) + mem[addr + 1]);
+                uint16_t *R = (reg->IR & 0x40) ? &reg->X : &reg->SP;
+                
+                *R = ((mem[addr] << 8) + mem[addr + 1]);
 
-                reg->CC.N = (*tmp & 0x8000) != 0; //bit 15 == 1
-                reg->CC.Z = (*tmp == 0);
+                reg->CC.N = (*R & 0x8000) != 0; //bit 15 == 1
+                reg->CC.Z = (*R == 0);
                 reg->CC.V = 0;
                 
                 break;
@@ -870,18 +980,19 @@ void do_step(registers_t *reg, uint8_t *mem)
             //STS/STX - Store stack pointer/index register
             case(0x0F):
             {
-                uint16_t *tmp = (reg->IR & 0x40) ? &reg->X : &reg->SP;
-                mem[addr] = ((*tmp >> 8) & 0xFF);
-                mem[addr + 1] = (*tmp & 0xFF);
+                uint16_t *R = (reg->IR & 0x40) ? &reg->X : &reg->SP;
+                
+                mem[addr] = ((*R >> 8) & 0xFF);
+                mem[addr + 1] = (*R & 0xFF);
 
-
-                reg->CC.N = (*tmp & 0x8000) != 0; //bit 15 == 1
-                reg->CC.Z = (*tmp == 0);
+                reg->CC.N = (*R & 0x8000) != 0; //bit 15 == 1
+                reg->CC.Z = (*R == 0);
                 reg->CC.V = 0;
                 
                 break;
             }           
         }
+        
     }
     
     if (pc == reg->PC)
@@ -889,6 +1000,7 @@ void do_step(registers_t *reg, uint8_t *mem)
         printf("Unimplemented opcode 0x%02X at 0x%04X\n", reg->IR, reg->PC);
         exit(-1);
     }
+    return num_cycles;
 }
 
 
