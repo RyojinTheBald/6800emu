@@ -6,6 +6,11 @@
 #include <ctype.h>
 
 #include <map>
+#include <vector>
+#include <tuple>
+#include <string>
+
+#include <iostream>
 
 //case insensitive string comparison
 int strcicmp(char const *a, char const *b)
@@ -23,7 +28,6 @@ struct char_cmp {
         return stricmp(a,b)<0;
     } 
 };
-typedef std::map<const char *, int, char_cmp> Map;
 
 
 struct opData
@@ -164,13 +168,24 @@ opMap_t opMap = {
 };
 
 
-Map symbolMap;
+
+typedef std::map<std::string, std::vector<uint16_t>> labelMap_t;
+typedef std::map<std::string, uint16_t> resolvedLabels_t;
 
 
+//Holds unresolved label references
+labelMap_t labelMap;
 
-uint8_t assmProgram[0x10000];
+//Holds addresses of resolved labels
+resolvedLabels_t resolvedLabels;
+
+uint8_t assmProgram[0x10000] = {0};
 uint16_t PC = 0;
 
+
+
+parseNode_t * rootNode = nullptr;
+parseNode_t * tailNode = nullptr;
 
 
 
@@ -201,7 +216,7 @@ int parseLine(char *line, uint16_t length)
         
     
     //check for label
-    if ((*line != ' ') && (*line != '\t'))
+    if (!isspace(*line))
     {
         //find end of label
         while ((*line != ' ') && (*line != '\t') && (*line != '\n'))
@@ -241,6 +256,8 @@ int parseLine(char *line, uint16_t length)
     //extract mnemonic
     strncpy(mnem, mnemStart, line - mnemStart);
     
+    
+    
     //check for end of line (in case of implicit mnemonic)
     if (*line == '\n')
         return line - start + 1;
@@ -248,7 +265,7 @@ int parseLine(char *line, uint16_t length)
     char *opStart = line;
     
     //find end of operand(s)
-    while ((*line != ';') && (*line != '\n'))
+    while ((*line != ';') && (*line != '\t') && (*line != '\n'))
     {
         if (*line == 0)
             return -1;
@@ -256,7 +273,7 @@ int parseLine(char *line, uint16_t length)
     }
     
     //extract operand(s)
-    strncpy(operands, opStart, line - opStart);
+    strncpy(operands, ++opStart, line - opStart);
     operands[line - opStart] = 0;
     
     //seek to end of line if stopped at comment
@@ -268,29 +285,91 @@ int parseLine(char *line, uint16_t length)
             line++;
         }
     
+
+    //assembler directive
+    if (*mnem == '.')
+    {
+        printf("PC:0x%04X label:%s\tDirective:%s\t operands:\"%s\"\n", PC, label, mnem, operands);
+        if (stricmp(mnem, ".org") == 0)
+        {
+            PC = decodeOperand(operands);
+        }
+        else if (stricmp(mnem, ".str") == 0)
+        {
+            char *tmp = opStart + 1;
+
+            while ((*tmp != '\"') && (*tmp != '\0'))
+            {
+                assmProgram[PC++] = *(tmp++);
+            }
+            //Null terminate
+            assmProgram[PC++] = 0;
+        }
+        else if (stricmp(mnem, ".byte") == 0)
+        {
+            assmProgram[PC++] = decodeOperand(opStart);
+        }
+        else if (stricmp(mnem, ".word") == 0)
+        {
+            uint16_t word = decodeOperand(opStart);
+            assmProgram[PC++] = word >> 8;
+            assmProgram[PC++] = word & 0x00ff;
+        }
+        return line - start;
+    }
+    else
+    {
+        printf("PC:0x%04X label:%s\tMnemonic:%s\tOperands:\"%s\"\n", PC, label, mnem, operands);
+    
+    }
+
+
+
+
+    
+    //Resolve label
+    if (strlen(label) > 0)
+    {
+        resolvedLabels[label] = PC;
+        
+        //This label has unresolved references
+        if (labelMap.count(label) > 0)
+        {
+            printf("Resolving dangling references to: %s\n", label);
+            for (auto it = std::begin(labelMap[label]); it != std::end(labelMap[label]); ++it)
+            {
+                assmProgram[*it] = PC;
+            }
+            labelMap.erase(label);
+        }
+    }
+    
+
     
     //determine address mode
     if (strlen(operands) == 0)
     {
         //inherent mode, no opperands
         assmProgram[PC] = opMap[mnem].inh;
+        //printf(" %02X\n", assmProgram[PC]);
         PC += opMap[mnem].inhLen;
     }
-    else if(*operands == '#')
+    else if(*(operands + 1) == '#')
     {
         //Immediate mode, single byte data
         assmProgram[PC] = opMap[mnem].imm;
         
         //skip '#'
-        //assmProgram[PC + 1] = decodeOperand(operands + 1);
-        
+        assmProgram[PC + 1] = decodeOperand(operands + 1);
+        //printf(" %02X\n", assmProgram[PC]);
         PC += opMap[mnem].immLen;
     }
-    else if(*(operands + strlen(operands)) == 'x')
+    else if(*(operands + strlen(operands) - 1) == 'x')
     {
         //Index mode, single byte index offset
         assmProgram[PC] = opMap[mnem].idx;
-        //assmProgram[PC + 1] = decodeOperand(operands);
+        assmProgram[PC + 1] = decodeOperand(operands);
+        //printf(" %02X\n", assmProgram[PC]);
         PC += opMap[mnem].idxLen;
     }
     else
@@ -298,6 +377,16 @@ int parseLine(char *line, uint16_t length)
         //Direct, extended, or relative
         //if value > 255, must be extended, otherwise relative or direct
         
+        //printf("Direct address\n");
+        
+        
+        assmProgram[PC++] = opMap[mnem].dir;
+        
+        //label not in map, add
+        if (labelMap.count(operands) == 0)
+            labelMap[operands] = std::vector<uint16_t>();
+
+        labelMap[operands].push_back(PC++);
     }
     
     
@@ -305,26 +394,164 @@ int parseLine(char *line, uint16_t length)
     //add opcode
     //assmProgram[PC++] = opMap[mnem]
 
-    //printf("label:%s\tMnemonic:%s\tOperands:%s\n", label, mnem, operands);
     
-    printf("mnem:%s\timm:0x%02X\tidx:0x%02X\text:0x%02X\tinh:0x%02X\n", mnem, opMap[mnem].imm, opMap[mnem].idx, opMap[mnem].ext, opMap[mnem].inh);
+    //printf("mnem:%s\timm:0x%02X\tidx:0x%02X\text:0x%02X\tinh:0x%02X\n", mnem, opMap[mnem].imm, opMap[mnem].idx, opMap[mnem].ext, opMap[mnem].inh);
 
     return line - start + 1;
 }
 
 
-void assembleProgram(char *code)
+uint16_t decodeOperand(char *operands)
 {
-    /*
-     * symbol map:
-     *  when encountering undefined symbol, add to map with address to be inserted
-     *  when undefined symbol is defined, rewrite associated addresses with actual address
-     * 
-     * 
-     * 
-     * 
-     *
-    */
+    //Convert from hex
+    if (*operands == '$')
+    {
+        char *ptr;
+        return strtol(++operands, &ptr, 16);
+    }
+    else
+        return atoi(operands);
+}
+
+
+std::map<std::string, std::vector<parseNode_t*>> unresolvedReferences;
+std::map<std::string, parseNode_t*> referenceMap;
+
+
+uint16_t linenum = 0;
+
+void doTreeParse(std::string line)
+{
+    linenum++;
+    //full-line comment, ignore
+    if (line[0] == ';')
+        return;
+    
+    //skip blank lines
+    if(line.find_first_not_of(" \t\n") == std::string::npos)
+        return;
+
+    parseNode_t * thisNode = new parseNode_t();
+
+    thisNode->linenum = linenum;
+
+    //check for line label
+    std::size_t firstSpace = line.find_first_of(" \t");
+    if (firstSpace > 0)
+    {
+        thisNode->label = line.substr(0, firstSpace);
+        
+        //Add label to reference map
+        if (referenceMap.count(thisNode->label) > 0)
+        {
+            std::cerr << "Error: Multiple definitions of label \"" << thisNode->label << "\"" << std::endl;
+            return;
+        }
+        else
+            referenceMap[thisNode->label] = thisNode;
+        
+        //Resolve references pointing at this label
+        if (unresolvedReferences.count(thisNode->label) > 0)
+        {
+            for (auto it = unresolvedReferences[thisNode->label].begin(); it != unresolvedReferences[thisNode->label].end(); it++)
+                (*it)->target = thisNode;
+            unresolvedReferences.erase(thisNode->label);
+        }
+    }
+    
+    //get mnemonic
+    std::size_t startMnem = line.find_first_not_of(" \t", ++firstSpace);
+    std::size_t endMnem = line.find_first_of(" \t\n", startMnem);
+    thisNode->mnemonic = line.substr(startMnem, endMnem - startMnem);
+
+    //get operand
+    std::size_t startOp = line.find_first_not_of(" \t", endMnem);
+    std::size_t endOp = line.find_first_of(" \t;\n", startOp);
+    if ((startOp != endOp) && (endOp != std::string::npos))
+    {
+        thisNode->operand = line.substr(startOp, endOp - startOp);
+        
+        //parse for target instruction line
+        if ((thisNode->operand[0] >= 'a' && thisNode->operand[0] <= 'z') || (thisNode->operand[0] >= 'A' && thisNode->operand[0] <= 'Z'))
+        {
+            if (referenceMap.count(thisNode->operand) > 0)
+                thisNode->target = referenceMap[thisNode->operand];
+            else
+                unresolvedReferences[thisNode->operand].push_back(thisNode);
+        }
+        
+    }
+
+    if (rootNode == nullptr)
+    {
+        rootNode = thisNode;
+        tailNode = thisNode;
+    }
+    else
+    {
+        thisNode->prev = tailNode;
+        tailNode->next = thisNode;
+        tailNode = thisNode;
+    }
+}
+
+
+
+void dumpTree()
+{
+    parseNode_t * node = rootNode;
+    while (node->next != nullptr)
+    {
+        std::cout << node->linenum << " " << node->label << "\t" << node->mnemonic << "\t" << node->operand;
+        if (node->target != nullptr)
+            std::cout << "\ttargetting:" << node->target->mnemonic << "(" << node->target->linenum << ")";
+        node = node->next;
+        std::cout << std::endl;
+    }
+    
+    std::cout << "unresolved references:" << std::endl;
+    
+    for (auto it = unresolvedReferences.begin(); it != unresolvedReferences.end(); it++)
+    {
+        std::cout << it->first << ": ";
+        
+        for (auto vecIt = it->second.begin(); vecIt != it->second.end(); vecIt++)
+            std::cout << (*vecIt)->linenum << " ";
+        
+        std::cout << std::endl;
+    }
+}
+
+
+void dump()
+{
+    for (int y = 0; y < 20; y++)
+    {
+        printf("0x%04X", y * 16);
+        for (int x = 0; x < 16; x++)
+        {
+            printf("  %02X", assmProgram[x + (y * 16)]);
+        }
+        printf("\n");
+    }
+    
+    printf("Resolved labels:\n");
+    
+    for (auto it = resolvedLabels.begin(); it != resolvedLabels.end(); it++)
+    {
+        printf("%s - 0x%04X\n", it->first.c_str(), it->second);
+    }
     
     
+    printf("Unresolved labels:\n");
+    
+    for (auto it = labelMap.begin(); it != labelMap.end(); it++)
+    {
+        printf("%s -", it->first.c_str());
+        
+        for (auto vecIt = it->second.begin(); vecIt != it->second.end(); vecIt++)
+            printf(" 0x%04X", *vecIt);
+        
+        printf("\n");
+    }
 }

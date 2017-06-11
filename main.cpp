@@ -103,10 +103,20 @@ int main(int argc, char **argv)
     
         while (fgets(buffer, 256, filePointer) != NULL)
         {
-            parseLine(buffer, strlen(buffer));
+            if (strlen(buffer) == 0)
+                break;
+            //parseLine(buffer, strlen(buffer));
+            doTreeParse(buffer);
+
         }
+        
+        doTreeParse(buffer);
+  
         fclose(filePointer);
     }
+
+    dumpTree();
+
 
     /*
     
